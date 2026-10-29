@@ -1,0 +1,29 @@
+{
+  "name": "rita-pm-bot",
+  "version": "1.0.0",
+  "description": "Telegram PM bot for multi-group project triage",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "db:push": "prisma db push",
+    "db:generate": "prisma generate",
+    "vika:extract": "tsx scripts/extract-vika-messages.ts"
+  },
+  "keywords": ["telegram", "bot", "pm"],
+  "license": "ISC",
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "dotenv": "^18.0.9",
+    "grammy": "^1.46.0",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "prisma": "^5.22.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}

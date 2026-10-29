@@ -1,0 +1,70 @@
+# Сотрудники V-Brand — роли для Rita (личка, внутренние и проектные чаты)
+people:
+  - key: victoria
+    display_name: Виктория
+    role: pm
+    role_label: проектный менеджер
+    telegram_user_id: 1632591562
+
+  - key: stas
+    display_name: Станислав
+    role: developer
+    role_label: разработчик
+    telegram_user_id: 824020353
+    telegram_username: EobardThawne1
+    project_roles:
+      newarmor: content_manager
+
+  - key: sasha
+    display_name: Саша
+    role: designer
+    role_label: дизайнер
+    telegram_user_id: 697937494
+
+  - key: danil
+    display_name: Данил
+    role: art_director
+    role_label: арт-директор
+    telegram_username: muzykin_design
+    aliases:
+      - данил
+      - даня
+      - музыкин
+
+  - key: pavel
+    display_name: Павел
+    role: boss
+    role_label: руководитель
+    # нужен числовой id, иначе финансовый вопрос в личку не дойдёт
+    # telegram_user_id:
+    telegram_username: thevorontsov
+
+  - key: denis
+    display_name: Денис
+    role: other
+    role_label: руководитель отдела продаж
+    telegram_username: gdegeden
+    aliases:
+      - денис
+      - денису
+      - дениса
+
+  - key: viola
+    display_name: Виола
+    role: designer
+    role_label: дизайнер
+    telegram_username: herry1one
+    aliases:
+      - виола
+      - виоле
+      - виолу
+
+  - key: vadim
+    display_name: Вадим
+    role: other
+    role_label: smm-специалист
+    telegram_username: opera_physicist
+    aliases:
+      - вадим
+      - вадиму
+      - вадима

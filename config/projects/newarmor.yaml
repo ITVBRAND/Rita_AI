@@ -1,0 +1,33 @@
+slug: newarmor
+name: NEW ARMOR
+mode: relay
+
+# Клиент в боевом чате
+client_telegram_usernames:
+  - Vitaly_Simonyak
+
+# Пока тестируете сами — админ может писать как клиент (см. allow_admin_as_client)
+allow_admin_as_client: true
+
+chats:
+  # Настоящая группа с клиентом. Риту добавят позже — привязка уже есть.
+  - telegram_chat_id: "-1004434815157"
+    role: client
+    label: "NEW ARMOR — чат с клиентом"
+  # Только сотрудники V-Brand, не по рабочим вопросам.
+  # Рита отвечает здесь, только когда к ней обращаются.
+  - telegram_chat_id: "-4194489462"
+    role: staff
+    label: "V-Brand — внутренний чат сотрудников"
+  - telegram_chat_id: "-5210428963"
+    role: executor
+    skill: general
+    label: "Тест (разработчики) ньюармор"
+
+people: []
+
+routing:
+  payment: [site]
+  site: [site]
+  onec: [site]
+  general: [site]

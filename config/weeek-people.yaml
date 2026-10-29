@@ -1,0 +1,29 @@
+# Сотрудники V-Brand в Weeek, которым бот может ставить задачи
+# Задача создаётся ТОЛЬКО если в сообщении к ним обратились (имя / @username / mention)
+
+default_project_id: 8 # NEW ARMOR в Weeek
+
+people:
+  - key: stas
+    display_name: Станислав Ткачёв
+    weeek_user_id: 9d76aa04-9078-4e87-9944-252ce9943765
+    telegram_user_id: 824020353
+    aliases:
+      - стас
+      - станислав
+      - станиславу
+      - стасу
+      - ткачёв
+      - ткачев
+
+  - key: victoria
+    display_name: Виктория Беловолова
+    weeek_user_id: 9d70921a-79bf-4215-b71e-ace4f0f3787d
+    telegram_user_id: 1632591562
+    aliases:
+      - вика
+      - виктория
+      - виктории
+      - вике
+      - беловолова
+      - VictoriaMe_B

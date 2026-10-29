@@ -1,0 +1,121 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Project {
+  id        String   @id @default(cuid())
+  slug      String   @unique
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  tickets   Ticket[]
+  chats     ChatBinding[]
+}
+
+model ChatBinding {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  chatId    String
+  role      String // client | executor
+  skill     String @default("general") // site | onec | general | payment
+  label     String @default("")
+
+  @@unique([projectId, chatId])
+  @@index([chatId])
+}
+
+model Ticket {
+  id               String   @id @default(cuid())
+  number           Int
+  projectId        String
+  project          Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  status           String   @default("collecting") // collecting | open | waiting_client | waiting_executor | resolved | cancelled
+  skill            String   @default("general")
+  summary          String
+  orderRef         String?
+  clientChatId     String
+  executorChatIds  String   @default("[]") // JSON array of chat ids
+  openedByUserId   String?
+  assigneeUserId   String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  resolvedAt       DateTime?
+  /// Что сказали разработчики, когда закрыли проблему.
+  resolution       String?
+  messages         TicketMessage[]
+  links            TicketLink[]
+
+  @@unique([projectId, number])
+  @@index([status])
+}
+
+model TicketMessage {
+  id                String   @id @default(cuid())
+  ticketId          String
+  ticket            Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  direction         String // client | executor | bot
+  telegramMessageId String
+  chatId            String
+  fromUserId        String?
+  text              String   @default("")
+  hasMedia          Boolean  @default(false)
+  createdAt         DateTime @default(now())
+
+  @@index([ticketId])
+  @@index([chatId, telegramMessageId])
+}
+
+model TicketLink {
+  id                     String @id @default(cuid())
+  ticketId               String
+  ticket                 Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  chatId                 String
+  telegramMessageId      String
+  kind                   String // card | client_ack | clarify
+
+  @@unique([chatId, telegramMessageId])
+  @@index([ticketId])
+}
+
+model Meta {
+  key   String @id
+  value String
+}
+
+/// Переписка сотрудника с Ритой. Хранится целиком, в промпт попадают последние реплики.
+model DialogueTurn {
+  id        String   @id @default(cuid())
+  chatId    String
+  userId    String
+  seq       Int
+  who       String // user | rita
+  text      String
+  createdAt DateTime @default(now())
+
+  @@index([chatId, userId, seq])
+}
+
+/// Короткое содержание диалога с сотрудником. Обновляется после каждой реплики.
+model DialogueSummary {
+  id        String   @id @default(cuid())
+  chatId    String
+  userId    String
+  summary   String
+  updatedAt DateTime @updatedAt
+
+  @@unique([chatId, userId])
+}
+
+/// Поправка или правило, которое Рита должна учитывать дальше.
+model Lesson {
+  id        String   @id @default(cuid())
+  text      String
+  chatId    String?
+  createdAt DateTime @default(now())
+}
