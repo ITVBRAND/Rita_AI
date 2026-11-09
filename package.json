@@ -8,16 +8,24 @@
     "dev": "tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
+    "test": "node scripts/test-memory.mjs",
     "db:push": "prisma db push",
     "db:generate": "prisma generate",
+    "db:deploy": "prisma migrate deploy",
     "vika:extract": "tsx scripts/extract-vika-messages.ts"
   },
-  "keywords": ["telegram", "bot", "pm"],
+  "keywords": [
+    "telegram",
+    "bot",
+    "pm"
+  ],
   "license": "ISC",
   "dependencies": {
     "@prisma/client": "^5.22.0",
     "dotenv": "^18.0.9",
     "grammy": "^1.46.0",
+    "mammoth": "^1.13.0",
+    "pdf-parse": "^2.4.5",
     "yaml": "^2.9.1"
   },
   "devDependencies": {

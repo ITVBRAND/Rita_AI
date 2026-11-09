@@ -1,4 +1,5 @@
 import { env } from "../env.js";
+import { openaiJson } from "../ai/openaiHttp.js";
 import { CLIENT_VOICE_SYSTEM, buildClientVoiceUserPayload } from "./vikaStyle.js";
 import {
   sanitizeReplyAgainstClientFacts,
@@ -128,13 +129,9 @@ export async function generateClientReply(ctx: ClientReplyContext): Promise<stri
   };
 
   try {
-    const res = await fetch(`${env.openaiBaseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.openaiApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
+    const data = await openaiJson<{
+      choices?: Array<{ message?: { content?: string } }>;
+    }>("chat/completions", {
         model: env.openaiModel,
         temperature: 0.4,
         messages: [
@@ -144,17 +141,7 @@ export async function generateClientReply(ctx: ClientReplyContext): Promise<stri
             content: buildClientVoiceUserPayload(payload),
           },
         ],
-      }),
     });
-
-    if (!res.ok) {
-      console.error("client voice LLM error", res.status, await res.text());
-      return fallback;
-    }
-
-    const data = (await res.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
     const text = data.choices?.[0]?.message?.content?.trim();
     if (!text || text.length > 600) return fallback;
     return finalizeClientText(text, ctx);

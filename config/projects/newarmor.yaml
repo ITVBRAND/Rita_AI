@@ -19,10 +19,10 @@ chats:
   - telegram_chat_id: "-4194489462"
     role: staff
     label: "V-Brand — внутренний чат сотрудников"
-  - telegram_chat_id: "-5210428963"
+  - telegram_chat_id: "-1004336628110"
     role: executor
-    skill: general
-    label: "Тест (разработчики) ньюармор"
+    skill: site
+    label: "Разработка (ТЕСТ)"
 
 people: []
 

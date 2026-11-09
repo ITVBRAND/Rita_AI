@@ -1,5 +1,6 @@
 import { env } from "../env.js";
 import { CLIENT_VOICE_SYSTEM, buildClientVoiceUserPayload } from "./vikaStyle.js";
+import { openaiJson } from "../ai/openaiHttp.js";
 
 export async function answerClientQuestion(params: {
   projectName: string;
@@ -11,13 +12,9 @@ export async function answerClientQuestion(params: {
   if (!env.openaiApiKey) return fallback;
 
   try {
-    const res = await fetch(`${env.openaiBaseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.openaiApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
+    const data = await openaiJson<{
+      choices?: Array<{ message?: { content?: string } }>;
+    }>("chat/completions", {
         model: env.openaiModel,
         temperature: 0.35,
         messages: [
@@ -35,12 +32,7 @@ export async function answerClientQuestion(params: {
             }),
           },
         ],
-      }),
     });
-    if (!res.ok) return fallback;
-    const data = (await res.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
     return data.choices?.[0]?.message?.content?.trim() || fallback;
   } catch {
     return fallback;
@@ -60,13 +52,9 @@ export async function wrapDevMessageForClientWithContext(
   if (!env.openaiApiKey) return fallback;
 
   try {
-    const res = await fetch(`${env.openaiBaseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.openaiApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
+    const data = await openaiJson<{
+      choices?: Array<{ message?: { content?: string } }>;
+    }>("chat/completions", {
         model: env.openaiModel,
         temperature: 0.3,
         messages: [
@@ -84,12 +72,7 @@ export async function wrapDevMessageForClientWithContext(
             }),
           },
         ],
-      }),
     });
-    if (!res.ok) return fallback;
-    const data = (await res.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
     return data.choices?.[0]?.message?.content?.trim() || fallback;
   } catch {
     return fallback;

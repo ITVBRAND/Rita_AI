@@ -33,6 +33,8 @@ export async function syncProjectsFromYaml(): Promise<LoadedProject[]> {
     for (const chat of yaml.chats || []) {
       const chatId = chat.telegram_chat_id != null ? String(chat.telegram_chat_id) : "";
       if (!chatId || chatId.startsWith("REPLACE") || chatId === "0") continue;
+      const revoked = await prisma.chatBindingRevocation.findUnique({ where: { chatId }, select: { id: true } });
+      if (revoked) continue;
       await prisma.chatBinding.upsert({
         where: { projectId_chatId: { projectId: project.id, chatId } },
         create: {

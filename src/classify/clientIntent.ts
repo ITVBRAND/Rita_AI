@@ -1,5 +1,6 @@
 import { env } from "../env.js";
 import { isContentCatalogTask } from "./contentTask.js";
+import { openaiJson } from "../ai/openaiHttp.js";
 
 export type ClientIntentKind = "content" | "incident" | "advice";
 
@@ -88,13 +89,9 @@ export async function understandClientRequest(text: string): Promise<ClientInten
   if (!env.openaiApiKey || !text.trim()) return safe;
 
   try {
-    const res = await fetch(`${env.openaiBaseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.openaiApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
+    const data = await openaiJson<{
+      choices?: Array<{ message?: { content?: string } }>;
+    }>("chat/completions", {
         model: env.openaiModel,
         temperature: 0.2,
         response_format: { type: "json_object" },
@@ -102,15 +99,7 @@ export async function understandClientRequest(text: string): Promise<ClientInten
           { role: "system", content: SYSTEM },
           { role: "user", content: text.slice(0, 2000) },
         ],
-      }),
     });
-    if (!res.ok) {
-      console.error("client intent LLM error", res.status, await res.text());
-      return safe;
-    }
-    const data = (await res.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
     const parsed = JSON.parse(data.choices?.[0]?.message?.content || "{}") as {
       kind?: string;
       reply?: string;

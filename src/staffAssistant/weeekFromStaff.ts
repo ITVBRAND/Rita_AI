@@ -1,4 +1,5 @@
 import { isContentCatalogTask } from "../classify/contentTask.js";
+import { creatorForbids } from "../memory/ritaMemory.js";
 import {
   createWeeekTasksForPeople,
   isWeeekEnabled,
@@ -184,6 +185,7 @@ export async function tryCreateWeeekFromStaffRequest(params: {
 }): Promise<string | null> {
   const plan = planStaffWeeek(params);
   if (plan.kind === "none") return null;
+  if (await creatorForbids("weeek")) return "A creator-set policy currently forbids creating or updating Weeek tasks.";
 
   if (!isWeeekEnabled()) {
     return "Weeeek не подключён (нет WEEEK_API_TOKEN в .env).";

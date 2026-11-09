@@ -1,5 +1,5 @@
 import { Bot, type CommandContext } from "grammy";
-import { isAdmin, isBotOwner } from "../env.js";
+import { env, isAdmin, isBotOwner } from "../env.js";
 import { prisma } from "../db/client.js";
 import { classify, getClassifyMode } from "../classify/index.js";
 import type { Skill } from "../config/types.js";
@@ -31,16 +31,16 @@ import {
   generateClientReply,
   type ClientReplyKind,
 } from "../clientVoice/generate.js";
-import {
-  answerClientQuestion,
-  wrapDevMessageForClientWithContext,
-} from "../clientVoice/contextAnswer.js";
+import { answerClientQuestion } from "../clientVoice/contextAnswer.js";
 import type { BotContext } from "./context.js";
 import type { Ticket } from "@prisma/client";
 import type { ClassifyResult } from "../classify/types.js";
 import { assessClientReport } from "../classify/issueDetail.js";
 import { buildDevIssueSummary } from "../classify/issueSummary.js";
 import { handleStaffAssistantMessage, mentionsBot } from "./staffAssistant.js";
+import { deleteSharedMemory, findMemorySource, forgetMemory, listMemories, listSharedMemory, saveMemory, saveSharedMemory } from "../memory/ritaMemory.js";
+import { enqueueUnindexedTurns, processPendingMemory } from "../memory/semanticMemory.js";
+import { recallEarlierTurns } from "../staffAssistant/session.js";
 import { appendStaffExchange } from "../staffAssistant/session.js";
 import { textAddressesRita } from "./ritaAddress.js";
 import {
@@ -56,29 +56,20 @@ import {
 import { contentManagerMention, isVbrandTeamMember } from "../team/loadTeam.js";
 import { greetClient, understandClientRequest, type ClientIntent } from "../classify/clientIntent.js";
 import { holdFinanceMessage } from "../finance/hold.js";
+import { handleDeveloperReply, observeClientWorkChat } from "../relay/problemEscalation.js";
 import { understandClientMedia } from "../media/understand.js";
+import {
+  deactivateKnowledgeDocument,
+  indexKnowledgeDocument,
+  KnowledgeDocumentError,
+  listKnowledgeDocuments,
+  MAX_KNOWLEDGE_FILE_BYTES,
+} from "../memory/knowledgeDocuments.js";
 
 function repliesToBot(ctx: BotContext): boolean {
   const from = ctx.message?.reply_to_message?.from;
   if (!from?.is_bot) return false;
   return ctx.me?.id == null || from.id === ctx.me.id;
-}
-
-/** Ещё не сделано: будущее время и «сообщим, когда исправим». */
-function devStillWorking(text: string): boolean {
-  return /будем\s+проверя|проверяем|сообщ\w*|как\s+исправим|когда\s+исправим|исправим|исправите|взяли\s+в\s+работу|в\s+работе|смотрим|разбираемся|будет\s+готово|когда\s+(?:будет\s+)?готово|ещё\s+не|пока\s+не/iu.test(
-    text,
-  );
-}
-
-/** Закрываем только прошедшее: исправили, можно проверять. «Исправим» — не закрытие. */
-function devSaysResolved(text: string): boolean {
-  if (devStillWorking(text) && !/исправили|исправлено|исправлена|починил|можно\s+проверять/iu.test(text)) {
-    return false;
-  }
-  return /исправили|исправлено|исправлена|исправлен\b|починил[иа]?|починено|решено|решили|можно\s+проверять|(?:^|[\s,!.])готово(?:[\s.!]|$)/iu.test(
-    text,
-  );
 }
 
 function msgText(ctx: BotContext): string {
@@ -302,20 +293,98 @@ export function registerHandlers(bot: Bot<BotContext>) {
       return;
     }
     const chatId = String(ctx.chat.id);
-    await prisma.chatBinding.upsert({
-      where: { projectId_chatId: { projectId: project.id, chatId } },
-      create: {
-        projectId: project.id,
-        chatId,
-        role,
-        skill,
-        label: ctx.chat.title || "",
-      },
-      update: { role, skill, label: ctx.chat.title || "" },
+    await prisma.$transaction(async (tx) => {
+      await tx.chatBindingRevocation.deleteMany({ where: { chatId } });
+      await tx.chatBinding.upsert({
+        where: { projectId_chatId: { projectId: project.id, chatId } },
+        create: {
+          projectId: project.id,
+          chatId,
+          role,
+          skill,
+          label: ctx.chat.title || "",
+        },
+        update: { role, skill, label: ctx.chat.title || "" },
+      });
     });
     await ctx.reply(
       `Чат привязан к ${slug} как ${role}${skill ? ` / ${skill}` : ""}.\nid: ${chatId}`,
     );
+  });
+
+  bot.command("unbind", async (ctx) => {
+    const uid = ctx.from?.id;
+    if (!uid || !isBotOwner(uid)) { await ctx.reply("Only the bot creator can remove project chat bindings."); return; }
+    if (ctx.chat?.type !== "private") { await ctx.reply("Use /unbind in a private chat with Rita."); return; }
+    const chatId = (ctx.match || "").trim().split(/\s+/, 1)[0];
+    if (!/^-?\d+$/.test(chatId)) {
+      await ctx.reply("Usage: /unbind <chat_id>. Get the ID from /projects.");
+      return;
+    }
+    const bindings = await prisma.chatBinding.findMany({ where: { chatId }, include: { project: true } });
+    if (!bindings.length) {
+      const revoked = await prisma.chatBindingRevocation.findUnique({ where: { chatId }, select: { id: true } });
+      await ctx.reply(revoked ? `Chat ${chatId} is already unbound.` : `No active project binding for chat ${chatId}.`);
+      return;
+    }
+    await prisma.$transaction(async (tx) => {
+      await tx.chatBinding.deleteMany({ where: { chatId } });
+      await tx.chatBindingRevocation.upsert({
+        where: { chatId },
+        create: { chatId, disabledBy: String(uid) },
+        update: { disabledBy: String(uid), createdAt: new Date() },
+      });
+    });
+    const removed = bindings.map((binding) => `${binding.project.slug}/${binding.role}`).join(", ");
+    await ctx.reply(`Removed ${removed} binding for ${chatId}. Rita is still a member of the Telegram group; only project processing was disabled. Use /bind in that group to bind it again.`);
+  });
+
+  bot.command("access", async (ctx) => {
+    const uid = ctx.from?.id;
+    if (!uid || (!isBotOwner(uid) && !isAdmin(uid))) {
+      await ctx.reply("Только администратор может управлять доступом к личным сообщениям.");
+      return;
+    }
+    if (ctx.chat?.type !== "private") {
+      await ctx.reply("Используйте /access в личном чате с Ритой.");
+      return;
+    }
+
+    const [action, targetId] = (ctx.match || "").trim().split(/\s+/, 2);
+    if (action === "add" || action === "remove") {
+      if (!targetId || !/^\d{1,20}$/.test(targetId)) {
+        await ctx.reply(`Формат: /access ${action} <telegram_user_id>`);
+        return;
+      }
+      if (isBotOwner(Number(targetId)) || isAdmin(Number(targetId))) {
+        await ctx.reply("Этот пользователь уже имеет постоянный административный доступ и не управляется списком.");
+        return;
+      }
+      if (action === "add") {
+        const result = await prisma.privateChatAccess.upsert({
+          where: { userId: targetId },
+          create: { userId: targetId, grantedBy: String(uid), allowed: true },
+          update: { grantedBy: String(uid), allowed: true },
+        });
+        await ctx.reply(`Доступ к личным сообщениям разрешён для Telegram ID ${result.userId}.`);
+        return;
+      }
+      await prisma.privateChatAccess.upsert({
+        where: { userId: targetId },
+        create: { userId: targetId, grantedBy: String(uid), allowed: false },
+        update: { grantedBy: String(uid), allowed: false },
+      });
+      await ctx.reply(`Доступ к личным сообщениям отозван у Telegram ID ${targetId}.`);
+      return;
+    }
+    if (action === "list") {
+      const users = await prisma.privateChatAccess.findMany({ where: { allowed: true }, orderBy: { createdAt: "asc" } });
+      await ctx.reply(users.length
+        ? ["Пользователи с доступом к личным сообщениям:", ...users.map((user) => `• ${user.userId} (добавил администратор ${user.grantedBy})`)].join("\n")
+        : "В списке нет пользователей. Администраторы и участники команды имеют доступ независимо от него.");
+      return;
+    }
+    await ctx.reply("Команды: /access add <telegram_user_id>, /access remove <telegram_user_id>, /access list");
   });
 
   bot.command("ticket", async (ctx) => {
@@ -330,12 +399,149 @@ export function registerHandlers(bot: Bot<BotContext>) {
     await handleStatusCommand(ctx, "open");
   });
 
+  bot.command("teach", async (ctx) => {
+    const uid = ctx.from?.id;
+    if (!uid || !isBotOwner(uid)) { await ctx.reply("Only the bot creator can change shared memory and Rita's rules."); return; }
+    if (ctx.chat?.type !== "private") { await ctx.reply("Use /teach in a private chat with Rita."); return; }
+    const [action, ...rest] = (ctx.match || "").trim().split(/\s+/);
+    const value = rest.join(" ").trim();
+    if (action === "index") {
+      const users = await prisma.dialogueTurn.findMany({ distinct: ["userId"], select: { userId: true } });
+      let queued = 0;
+      for (const user of users) {
+        queued += await enqueueUnindexedTurns(user.userId);
+        void processPendingMemory(user.userId).catch((error) => console.error("shared memory queue failed", error));
+      }
+      await ctx.reply(`Queued ${queued} historical turns from ${users.length} staff accounts for shared fact extraction. Remaining history is handled in later batches.`); return;
+    }
+    if ((action === "allow" || action === "forbid") && value.length >= 4) {
+      const id = await saveSharedMemory({ category: action === "allow" ? "creator_allow" : "creator_forbid", content: value, createdBy: String(uid) });
+      await ctx.reply(`Saved creator policy (${action}). ID: ${id}. The newest matching policy wins.`); return;
+    }
+    if (action === "fact" && value.length >= 5) {
+      const id = await saveSharedMemory({ category: "fact", content: value, createdBy: String(uid), confidence: 1 });
+      await ctx.reply(`Saved fact to shared memory. ID: ${id}`); return;
+    }
+    if (action === "remove" && value) {
+      await ctx.reply(await deleteSharedMemory(value) ? "Removed from shared memory." : "No active shared record with that ID."); return;
+    }
+    if (action === "list") {
+      const items = await listSharedMemory();
+      await ctx.reply(items.length ? items.map((m) => `${m.id} [${m.category}] ${m.content}`).join("\n").slice(0, 3800) : "Shared memory is empty."); return;
+    }
+    await ctx.reply("Commands: /teach allow <what Rita may do>; /teach forbid <what Rita must not do>; /teach fact <shared fact>; /teach index; /teach list; /teach remove <id>");
+  });
+
+  bot.command("docs", async (ctx) => {
+    const uid = ctx.from?.id;
+    if (!uid || !isBotOwner(uid)) { await ctx.reply("Only the bot creator can manage shared reference documents."); return; }
+    if (ctx.chat?.type !== "private") { await ctx.reply("Use /docs in a private chat with Rita."); return; }
+    const [action, id] = (ctx.match || "").trim().split(/\s+/, 2);
+    if (action === "list") {
+      const docs = await listKnowledgeDocuments();
+      await ctx.reply(docs.length
+        ? docs.map((doc) => `${doc.id} [${doc.status}; ${doc.chunkCount} chunks] ${doc.title} (${doc.fileName})`).join("\n").slice(0, 3800)
+        : "No reference documents yet. Send me a PDF or DOCX in this private chat.");
+      return;
+    }
+    if (action === "remove" && id) {
+      await ctx.reply(await deactivateKnowledgeDocument(id) ? "Document removed from search." : "No active document with that ID.");
+      return;
+    }
+    await ctx.reply("Send a PDF or DOCX here to index it. Commands: /docs list; /docs remove <id>.");
+  });
+
+  bot.command("memory", async (ctx) => {
+    const uid = ctx.from?.id;
+    if (!uid || (!isVbrandTeamMember(ctx.from) && !isBotOwner(uid))) return;
+    if (ctx.chat?.type !== "private") { await ctx.reply("Use memory commands in a private chat with Rita."); return; }
+    const arg = (ctx.match || "").trim();
+    const [action, ...rest] = arg.split(/\s+/);
+    const chatId = String(ctx.chat.id);
+    if (action === "shared") {
+      const shared = await listSharedMemory();
+      await ctx.reply(shared.length ? shared.map((m) => `${m.id} [${m.category}] ${m.content}`).join("\n").slice(0, 3800) : "Shared memory is empty."); return;
+    }
+    if (action === "add" && rest.length) {
+      await saveMemory(String(uid), null, "rule", rest.join(" ").slice(0, 1000), []);
+      await ctx.reply("Saved to your private memory."); return;
+    }
+    if (action === "delete" && rest[0]) {
+      await ctx.reply(await forgetMemory(String(uid), rest[0]) ? "Private memory removed." : "No active private memory with that ID."); return;
+    }
+    if (action === "source" && rest[0]) {
+      const source = await findMemorySource(String(uid), rest[0]);
+      if (!source) { await ctx.reply("Memory record not found."); return; }
+      const excerpt = source.turns.map((t) => `${t.createdAt.toLocaleString("ru-RU")}: ${t.who === "rita" ? "Rita" : "You"} ? ${t.text}`).join("\n");
+      await ctx.reply(excerpt || "No source turns are linked to this record."); return;
+    }
+    if (action === "search" && rest.length) {
+      const hits = await recallEarlierTurns(chatId, uid, rest.join(" "), env.memoryTimezone, true);
+      const output = hits.map((h) => `[${h.createdAt?.toLocaleString("ru-RU") ?? "unknown date"}${h.chatId ? `; chat ${h.chatId}` : ""}] ${h.who === "rita" ? "Rita" : "You"}: ${h.text}`).join("\n\n");
+      await ctx.reply(output.slice(0, 3800) || "No matching messages were found in your chats."); return;
+    }
+    if (action === "index") {
+      const added = await enqueueUnindexedTurns(String(uid));
+      void processPendingMemory(String(uid)).catch((error) => console.error("memory queue failed", error));
+      await ctx.reply(`Queued ${added} past messages for semantic indexing. Indexing continues in small batches as you chat with Rita.`); return;
+    }
+    const [memories, shared] = await Promise.all([listMemories(String(uid), chatId), listSharedMemory()]);
+    const output = ["Your private memories:", ...memories.map((m) => `${m.id} [${m.category}] ${m.content}`), "", "Shared team memory:", ...shared.map((m) => `${m.id} [${m.category}] ${m.content}`)].join("\n");
+    await ctx.reply(output.slice(0, 3800) || "Memory is empty.");
+  });
+
   bot.on("message", async (ctx) => {
     if (ctx.message?.text?.startsWith("/")) return;
 
     if (await holdFinanceMessage(ctx)) return;
 
-    if (ctx.chat?.type === "private" && isVbrandTeamMember(ctx.from) && !ctx.projectInfo) {
+    const textEarly = msgText(ctx);
+    const addressedToRita = mentionsBot(ctx, textEarly) || repliesToBot(ctx);
+    if (ctx.projectInfo?.binding.role === "client" && ctx.chat?.type !== "private") {
+      if ((await observeClientWorkChat(ctx)) === "hold") return;
+    }
+    if (ctx.projectInfo?.binding.role === "executor" && ctx.chat?.type !== "private") {
+      if ((await handleDeveloperReply(ctx)) === "handled") return;
+    }
+    if (ctx.chat?.type !== "private" && !addressedToRita) return;
+
+    if (ctx.chat?.type === "private" && ctx.message?.document) {
+      const uid = ctx.from?.id;
+      if (!uid || !isBotOwner(uid)) {
+        await ctx.reply("Shared document uploads are available only to the bot creator.");
+        return;
+      }
+      const file = ctx.message.document;
+      if (file.file_size != null && file.file_size > MAX_KNOWLEDGE_FILE_BYTES) {
+        await ctx.reply("Файл больше лимита 20 МБ. Отправь документ меньшего размера.");
+        return;
+      }
+      const fileName = file.file_name || (file.mime_type === "application/pdf" ? "document.pdf" : file.mime_type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ? "document.docx" : "document");
+      await ctx.reply("Получила документ. Извлекаю текст и индексирую фрагменты для поиска…");
+      try {
+        const remote = await ctx.api.getFile(file.file_id);
+        if (!remote.file_path) throw new KnowledgeDocumentError("Telegram не вернул путь для скачивания.");
+        const indexed = await indexKnowledgeDocument({
+          filePath: remote.file_path,
+          fileName,
+          mimeType: file.mime_type || "application/octet-stream",
+          uploadedBy: String(uid),
+        });
+        await ctx.reply(indexed.alreadyIndexed
+          ? `Этот документ уже есть в базе: ${indexed.title} (${indexed.chunkCount} фрагментов).`
+          : `Готово: ${indexed.title}. В индекс добавлено ${indexed.chunkCount} фрагментов; документ доступен для поиска во всех рабочих чатах.`);
+      } catch (error) {
+        if (error instanceof KnowledgeDocumentError) {
+          await ctx.reply(error.message);
+        } else {
+          console.error("knowledge document indexing failed", error);
+          await ctx.reply("Не удалось обработать документ. Проверь формат и попробуй ещё раз.");
+        }
+      }
+      return;
+    }
+
+    if (ctx.chat?.type === "private" && ctx.privateChatAuthorized && !ctx.projectInfo) {
       if (await handleStaffAssistantMessage(ctx)) return;
       return;
     }
@@ -343,30 +549,14 @@ export function registerHandlers(bot: Bot<BotContext>) {
     const info = ctx.projectInfo;
     if (!info) {
       const t = msgText(ctx);
-      if (ctx.chat?.type !== "private" && isVbrandTeamMember(ctx.from) && t.length > 2) {
-        if (await handleStaffAssistantMessage(ctx)) return;
-        if (mentionsBot(ctx, t) || textAddressesRita(t)) {
-          await ctx.reply(
-            "Чат не привязан к проекту. Админ: /bind newarmor client или /bind newarmor executor",
-          );
-        }
-        return;
-      }
-      if (
-        ctx.chat?.type !== "private" &&
-        isAdmin(ctx.from?.id) &&
-        t.length > 2 &&
-        (mentionsBot(ctx, t) || textAddressesRita(t))
-      ) {
-        await ctx.reply(
-          "Чат не привязан к проекту. В группе клиента: /bind newarmor client\nВ группе разработчиков: /bind newarmor executor",
-        );
+      const allowedOperator = isVbrandTeamMember(ctx.from) || isAdmin(ctx.from?.id);
+      if (ctx.chat?.type !== "private" && allowedOperator && t.length > 2 && (mentionsBot(ctx, t) || textAddressesRita(t))) {
+        await ctx.reply("В этой группе Rita не обрабатывает сообщения, пока владелец не привяжет её к проекту через /bind.");
       }
       return;
     }
 
     const relayMode = info.runtime?.mode !== "ticket";
-    const textEarly = msgText(ctx);
     const staffProject = {
       name: info.project.name,
       slug: info.project.slug,
@@ -427,7 +617,7 @@ export function registerHandlers(bot: Bot<BotContext>) {
         rolePlay.persona ? `Клиент: ${rolePlay.persona}` : "Обращение клиента",
         issue,
         "",
-        "↩️ Ответьте reply на это сообщение — перешлю клиенту.",
+        "↩️ Ответ клиенту уйдёт, только если напишете, что готово, или зададите уточняющий вопрос по этой проблеме.",
       ]
         .filter(Boolean)
         .join("\n");
@@ -486,7 +676,7 @@ export function registerHandlers(bot: Bot<BotContext>) {
 
     const relayDevUpdate =
       staffProject.bindingRole === "executor" &&
-      (shouldRelayDevToClient(ctx, textEarly) || repliesToBot(ctx));
+      shouldRelayDevToClient(ctx, textEarly);
 
     if (!relayDevUpdate && (await handleStaffAssistantMessage(ctx, staffProject))) {
       return;
@@ -557,77 +747,8 @@ export function registerHandlers(bot: Bot<BotContext>) {
       replyTicket = await findTicketByNumber(info.project.id, result.ticket_id);
     }
 
-    // Чат разработчиков: ответ клиенту (reply или любое сообщение по открытому тикету)
-    if (info.binding.role === "executor" && text && ctx.from && !ctx.from.is_bot) {
-      const linkedTicket = replyTicket ?? open[0] ?? null;
-      const ticket =
-        linkedTicket ??
-        (repliesToBot(ctx)
-          ? await prisma.ticket.findFirst({
-              where: { projectId: info.project.id },
-              orderBy: { updatedAt: "desc" },
-            })
-          : null);
-      if (ticket) {
-        const thread = await buildTicketThread(ticket.id);
-        await appendMessage({
-          ticketId: ticket.id,
-          direction: "executor",
-          telegramMessageId,
-          chatId,
-          fromUserId: fromId,
-          text,
-          hasMedia: media,
-        });
-
-        const isResolved = devSaysResolved(text);
-        if (isResolved) {
-          const updated = await setTicketStatus(ticket.id, "resolved", text);
-          const notice = relayMode
-            ? await generateClientReply({
-                kind: "resolved",
-                projectName: info.project.name,
-                clientText: text,
-                summary: `${updated.summary}\n${text}`,
-                clarifyHint: null,
-                orderRef: updated.orderRef,
-                hasMedia: media,
-                openTickets: [],
-              })
-            : formatResolvedNotice(updated);
-          await ctx.api.sendMessage(Number(updated.clientChatId), notice);
-          const thanks = await ctx.reply("Спасибо");
-          await addLink({
-            ticketId: ticket.id,
-            chatId,
-            telegramMessageId: String(thanks.message_id),
-            kind: "relay",
-          });
-          return;
-        }
-
-        const body = devStillWorking(text)
-          ? "Добрый день!\nРазбираемся. Сообщим, когда будет готово."
-          : await wrapDevMessageForClientWithContext(
-              text,
-              info.project.name,
-              ticket.summary,
-              thread,
-            );
-        await ctx.api.sendMessage(Number(ticket.clientChatId), body);
-        if (devStillWorking(text)) {
-          await setTicketStatus(ticket.id, "in_progress");
-        }
-        const thanks = await ctx.reply("Спасибо");
-        await addLink({
-          ticketId: ticket.id,
-          chatId,
-          telegramMessageId: String(thanks.message_id),
-          kind: "relay",
-        });
-        return;
-      }
-    }
+    // Ответы разработчиков разбирает handleDeveloperReply в начале обработчика:
+    // клиенту уходит только «готово» или уточнение по проблеме.
 
     // Вопрос клиента по открытой теме
     if (
@@ -701,6 +822,7 @@ export function registerHandlers(bot: Bot<BotContext>) {
       }
 
       if (result.status_hint === "waiting_client") {
+        if (info.binding.role === "executor") return;
         await setTicketStatus(replyTicket.id, "waiting_client");
         try {
           await ctx.api.sendMessage(
@@ -1018,7 +1140,12 @@ async function relayToDevelopers(
       : intent.kind === "advice"
         ? "Нужно согласовать доработку. Рита сама внедрение не решает."
         : null;
-  const devMessage = [contentMention, intentLabel, brief, "↩️ Ответьте reply на это сообщение — перешлю клиенту."]
+  const devMessage = [
+    contentMention,
+    intentLabel,
+    brief,
+    "↩️ Клиенту перешлю только ответ, что готово, или уточняющий вопрос по этой проблеме. Остальное не пересылаю.",
+  ]
     .filter(Boolean)
     .join("\n\n");
 

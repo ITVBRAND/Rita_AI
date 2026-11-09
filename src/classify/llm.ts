@@ -4,6 +4,7 @@ import { CLASSIFY_SYSTEM } from "./prompts.js";
 import { formatTeamRosterForPrompt } from "../team/loadTeam.js";
 import type { ClassifyInput, ClassifyResult } from "./types.js";
 import type { Skill } from "../config/types.js";
+import { openaiJson } from "../ai/openaiHttp.js";
 
 const SKILLS: Skill[] = ["site", "onec", "general", "payment"];
 
@@ -21,13 +22,9 @@ export async function classifyLlm(input: ClassifyInput): Promise<ClassifyResult>
   };
 
   try {
-    const res = await fetch(`${env.openaiBaseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.openaiApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
+    const data = await openaiJson<{
+      choices?: Array<{ message?: { content?: string } }>;
+    }>("chat/completions", {
         model: env.openaiModel,
         temperature: 0,
         response_format: { type: "json_object" },
@@ -35,18 +32,7 @@ export async function classifyLlm(input: ClassifyInput): Promise<ClassifyResult>
           { role: "system", content: CLASSIFY_SYSTEM },
           { role: "user", content: JSON.stringify(userPayload) },
         ],
-      }),
     });
-
-    if (!res.ok) {
-      const body = await res.text();
-      console.error("LLM error", res.status, body);
-      return classifyScript(input);
-    }
-
-    const data = (await res.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
     const content = data.choices?.[0]?.message?.content || "{}";
     const parsed = JSON.parse(content) as Partial<ClassifyResult>;
     return normalize(parsed, input);

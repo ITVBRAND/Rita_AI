@@ -26,10 +26,12 @@ export const env = {
       .map((s) => s.trim())
       .filter(Boolean),
   ),
-  databaseUrl: process.env.DATABASE_URL || "file:./data/pm.db",
+  databaseUrl: process.env.DATABASE_URL || "postgresql://rita_app:change-me@localhost:5432/rita_pm?schema=public",
   openaiApiKey: process.env.OPENAI_API_KEY?.trim() || "",
   openaiBaseUrl: (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, ""),
-  openaiModel: process.env.OPENAI_MODEL || "gpt-4o-mini",
+  openaiModel: process.env.OPENAI_MODEL || "gpt-6.1-terra",
+  openaiEmbeddingModel: process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small",
+  memoryTimezone: process.env.MEMORY_TIMEZONE || "Europe/Moscow",
   weeekApiToken: process.env.WEEEK_API_TOKEN?.trim() || "",
   get classifyMode(): "script" | "llm" {
     return this.openaiApiKey ? "llm" : "script";

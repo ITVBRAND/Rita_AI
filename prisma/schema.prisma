@@ -3,16 +3,16 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
 model Project {
-  id        String   @id @default(cuid())
-  slug      String   @unique
+  id        String        @id @default(cuid())
+  slug      String        @unique
   name      String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
   tickets   Ticket[]
   chats     ChatBinding[]
 }
@@ -23,33 +23,49 @@ model ChatBinding {
   project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
   chatId    String
   role      String // client | executor
-  skill     String @default("general") // site | onec | general | payment
-  label     String @default("")
+  skill     String  @default("general") // site | onec | general | payment
+  label     String  @default("")
 
   @@unique([projectId, chatId])
   @@index([chatId])
 }
 
+/// Persistent owner unbinds; prevents YAML sync from silently restoring a removed binding.
+model ChatBindingRevocation {
+  id         String   @id @default(cuid())
+  chatId     String   @unique
+  disabledBy String
+  createdAt  DateTime @default(now())
+}
+
+/// Telegram users explicitly allowed to use Rita in private chats.
+model PrivateChatAccess {
+  userId    String   @id
+  grantedBy String
+  allowed   Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
 model Ticket {
-  id               String   @id @default(cuid())
-  number           Int
-  projectId        String
-  project          Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  status           String   @default("collecting") // collecting | open | waiting_client | waiting_executor | resolved | cancelled
-  skill            String   @default("general")
-  summary          String
-  orderRef         String?
-  clientChatId     String
-  executorChatIds  String   @default("[]") // JSON array of chat ids
-  openedByUserId   String?
-  assigneeUserId   String?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
-  resolvedAt       DateTime?
+  id              String          @id @default(cuid())
+  number          Int
+  projectId       String
+  project         Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  status          String          @default("collecting") // collecting | open | waiting_client | waiting_executor | resolved | cancelled
+  skill           String          @default("general")
+  summary         String
+  orderRef        String?
+  clientChatId    String
+  executorChatIds String          @default("[]") // JSON array of chat ids
+  openedByUserId  String?
+  assigneeUserId  String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  resolvedAt      DateTime?
   /// Что сказали разработчики, когда закрыли проблему.
-  resolution       String?
-  messages         TicketMessage[]
-  links            TicketLink[]
+  resolution      String?
+  messages        TicketMessage[]
+  links           TicketLink[]
 
   @@unique([projectId, number])
   @@index([status])
@@ -72,12 +88,12 @@ model TicketMessage {
 }
 
 model TicketLink {
-  id                     String @id @default(cuid())
-  ticketId               String
-  ticket                 Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
-  chatId                 String
-  telegramMessageId      String
-  kind                   String // card | client_ack | clarify
+  id                String @id @default(cuid())
+  ticketId          String
+  ticket            Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  chatId            String
+  telegramMessageId String
+  kind              String // card | client_ack | clarify
 
   @@unique([chatId, telegramMessageId])
   @@index([ticketId])
@@ -90,15 +106,36 @@ model Meta {
 
 /// Переписка сотрудника с Ритой. Хранится целиком, в промпт попадают последние реплики.
 model DialogueTurn {
-  id        String   @id @default(cuid())
-  chatId    String
-  userId    String
-  seq       Int
-  who       String // user | rita
-  text      String
-  createdAt DateTime @default(now())
+  id          String           @id @default(cuid())
+  chatId      String
+  userId      String
+  seq         Int
+  who         String // user | rita
+  text        String
+  /// Stable Telegram update key; suffix distinguishes the user's message and Rita's reply.
+  eventKey    String?          @unique
+  createdAt   DateTime         @default(now())
+  memoryIndex TurnMemoryIndex?
 
   @@index([chatId, userId, seq])
+}
+
+/// Durable work queue and semantic index for each staff dialogue turn.
+model TurnMemoryIndex {
+  id              String                       @id @default(cuid())
+  turnId          String                       @unique
+  turn            DialogueTurn                 @relation(fields: [turnId], references: [id], onDelete: Cascade)
+  userId          String
+  chatId          String
+  embedding       String?
+  embeddingVector Unsupported("vector(1536)")?
+  embeddingModel  String?
+  extractedAt     DateTime?
+  attempts        Int                          @default(0)
+  createdAt       DateTime                     @default(now())
+
+  @@index([userId, createdAt])
+  @@index([extractedAt, createdAt])
 }
 
 /// Короткое содержание диалога с сотрудником. Обновляется после каждой реплики.
@@ -114,8 +151,132 @@ model DialogueSummary {
 
 /// Поправка или правило, которое Рита должна учитывать дальше.
 model Lesson {
-  id        String   @id @default(cuid())
-  text      String
-  chatId    String?
-  createdAt DateTime @default(now())
+  id                  String                       @id @default(cuid())
+  text                String
+  condition           String                       @default("")
+  action              String                       @default("")
+  rationale           String                       @default("")
+  chatId              String?
+  userId              String?
+  confidence          Float                        @default(0.6)
+  utilityScore        Float                        @default(0.0)
+  sourceExperienceIds String                       @default("[]")
+  embedding           String?
+  embeddingVector     Unsupported("vector(1536)")?
+  active              Boolean                      @default(true)
+  createdAt           DateTime                     @default(now())
+  updatedAt           DateTime                     @default(now()) @updatedAt
+
+  @@index([userId, active, utilityScore])
+  @@index([active, confidence, utilityScore])
+  @@index([userId, chatId, createdAt])
+}
+
+/// Curated feedback and explicit instructions used for reflection into lessons.
+model Experience {
+  id                 String    @id @default(cuid())
+  userId             String
+  chatId             String
+  kind               String // correction | explicit_instruction
+  userText           String
+  assistantText      String
+  outcome            String
+  success            Boolean?
+  reflectionAttempts Int       @default(0)
+  reflectedAt        DateTime?
+  createdAt          DateTime  @default(now())
+
+  @@index([reflectedAt, createdAt])
+  @@index([userId, createdAt])
+}
+
+/// Owner-uploaded reference documents shared with staff across chats.
+model KnowledgeDocument {
+  id         String           @id @default(cuid())
+  title      String
+  fileName   String
+  mimeType   String
+  sha256     String           @unique
+  uploadedBy String
+  byteSize   Int
+  textLength Int              @default(0)
+  chunkCount Int              @default(0)
+  status     String           @default("indexing") // indexing | ready | failed
+  active     Boolean          @default(true)
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+  chunks     KnowledgeChunk[]
+
+  @@index([active, status, createdAt])
+}
+
+model KnowledgeChunk {
+  id              String                       @id @default(cuid())
+  documentId      String
+  document        KnowledgeDocument            @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  chunkIndex      Int
+  text            String
+  embedding       String?
+  embeddingVector Unsupported("vector(1536)")?
+  createdAt       DateTime                     @default(now())
+
+  @@unique([documentId, chunkIndex])
+  @@index([documentId])
+}
+
+/// User-owned durable knowledge. Scope is currently deliberately restricted to the owner.
+model Memory {
+  id            String   @id @default(cuid())
+  userId        String
+  chatId        String?
+  category      String
+  content       String
+  sourceTurnIds String   @default("[]")
+  confidence    Float    @default(1.0)
+  active        Boolean  @default(true)
+  replacesId    String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([userId, active, updatedAt])
+  @@index([chatId, userId, active])
+}
+
+/// Shared work knowledge and creator-authored assistant policies.
+model SharedMemory {
+  id              String                       @id @default(cuid())
+  category        String // fact | project | decision | commitment | rule | creator_allow | creator_forbid
+  content         String
+  sourceTurnIds   String                       @default("[]")
+  sourceUserId    String?
+  createdBy       String
+  confidence      Float                        @default(1.0)
+  embedding       String?
+  embeddingVector Unsupported("vector(1536)")?
+  active          Boolean                      @default(true)
+  createdAt       DateTime                     @default(now())
+  updatedAt       DateTime                     @updatedAt
+
+  @@index([category, active, updatedAt])
+  @@index([active, updatedAt])
+}
+
+/// Проблема клиента в рабочем чате. Разработчикам уходит только если 5 минут никто не ответил. Имя клиента в это сообщение не попадает.
+model ProblemEscalation {
+  id           String    @id @default(cuid())
+  projectId    String
+  clientChatId String
+  fromUserId   String?
+  clientLabel  String    @default("")
+  text         String
+  messageIds   String    @default("[]")
+  hasMedia     Boolean   @default(false)
+  /// pending | answered | forwarding | forwarded | failed
+  status       String    @default("pending")
+  ticketId     String?
+  escalateAt   DateTime
+  createdAt    DateTime  @default(now())
+
+  @@index([status, escalateAt])
+  @@index([clientChatId, status])
 }

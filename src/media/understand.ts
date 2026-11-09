@@ -1,5 +1,6 @@
 import { env } from "../env.js";
 import type { BotContext } from "../bot/context.js";
+import { openaiForm, openaiJson } from "../ai/openaiHttp.js";
 
 const MAX_BYTES = 8 * 1024 * 1024;
 
@@ -28,13 +29,9 @@ async function downloadTelegramFile(fileId: string): Promise<Buffer | null> {
 
 async function readScreenshot(image: Buffer, mime: string): Promise<string | null> {
   const dataUrl = `data:${mime};base64,${image.toString("base64")}`;
-  const res = await fetch(`${env.openaiBaseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.openaiApiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
+  const data = await openaiJson<{
+    choices?: Array<{ message?: { content?: string } }>;
+  }>("chat/completions", {
       model: env.openaiModel,
       temperature: 0.2,
       messages: [
@@ -46,34 +43,19 @@ async function readScreenshot(image: Buffer, mime: string): Promise<string | nul
           ],
         },
       ],
-    }),
   });
-  if (!res.ok) {
-    console.error("screenshot read failed", res.status, await res.text());
-    return null;
-  }
-  const data = (await res.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
   const text = data.choices?.[0]?.message?.content?.trim();
   return text ? `[скрин] ${text}` : null;
 }
 
 async function transcribeAudio(audio: Buffer, filename: string, mime: string): Promise<string | null> {
-  const form = new FormData();
-  form.append("file", new Blob([new Uint8Array(audio)], { type: mime }), filename);
-  form.append("model", "whisper-1");
-  form.append("language", "ru");
-  const res = await fetch(`${env.openaiBaseUrl}/audio/transcriptions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${env.openaiApiKey}` },
-    body: form,
+  const data = await openaiForm<{ text?: string }>("audio/transcriptions", () => {
+    const form = new FormData();
+    form.append("file", new Blob([new Uint8Array(audio)], { type: mime }), filename);
+    form.append("model", "whisper-1");
+    form.append("language", "ru");
+    return form;
   });
-  if (!res.ok) {
-    console.error("voice transcription failed", res.status, await res.text());
-    return null;
-  }
-  const data = (await res.json()) as { text?: string };
   const text = data.text?.trim();
   return text ? `[голосовое] ${text}` : null;
 }

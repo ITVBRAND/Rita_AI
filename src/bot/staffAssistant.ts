@@ -1,14 +1,16 @@
 import type { BotContext } from "./context.js";
 import { textAddressesRita, textMentionsBotUsername } from "./ritaAddress.js";
 import { shouldSkipStaffForClientTest } from "./clientRolePlay.js";
-import { isBotOwner } from "../env.js";
+import { env, isBotOwner } from "../env.js";
 import { formatTeamDirectory, isVbrandTeamMember, resolveTeamMember } from "../team/loadTeam.js";
 import { generateStaffAssistantReply } from "../staffAssistant/reply.js";
+import { replyInTelegramParts, withTyping } from "./telegramReply.js";
 import { tryCreateWeeekFromStaffRequest } from "../staffAssistant/weeekFromStaff.js";
 import {
   appendStaffExchange,
   getStaffTurns,
   recallEarlierTurns,
+  saveStaffUserTurn,
   type StaffThreadLine,
 } from "../staffAssistant/session.js";
 import { understandMessageMedia } from "../media/understand.js";
@@ -16,11 +18,18 @@ import { getProjectByChatId } from "../config/loadProjects.js";
 import { addLink, appendMessage, createTicket } from "../tickets/service.js";
 import {
   asksForProblemStatus,
-  formatLessonsForPrompt,
   formatProblemStatus,
   getDialogueSummary,
+  formatMemoriesForPrompt,
+  formatSharedKnowledgeForPrompt,
+  formatCreatorPoliciesForPrompt,
+  creatorForbids,
+  parseCreatorPolicyInstruction,
+  saveSharedMemory,
   lessonTextFrom,
 } from "../memory/ritaMemory.js";
+import { formatRelevantLessonsForPrompt } from "../memory/experienceLearning.js";
+import { formatDocumentKnowledgeForPrompt } from "../memory/knowledgeDocuments.js";
 
 const QUIET_REQUEST_RE =
   /не\s+(?:нужно|надо)\s+отвеч|не\s+отвечай|не\s+на\s+кажд|каждое\s+(?:мо[её]\s+)?сообщен|когда\s+(?:оно|сообщение)\s+не\s+тебе/iu;
@@ -29,6 +38,59 @@ const FAMILY_JOKE_RE =
   /(?:тво[яюей]\s+фамили|фамили[яю]\s*(?:у\s+тебя|тво[яю])|какая\s+(?:у\s+тебя\s+)?фамили|как\s+(?:твоя\s+)?фамили|кто\s+(?:твой|тебя)\s+(?:отец|папа)|твой\s+(?:отец|папа)|кто\s+тебя\s+родил)/iu;
 
 const FAMILY_JOKE_REPLY = "Ткачева) Отец — Станислав Ткачев.";
+
+const STAFF_MESSAGE_GROUP_MS = 2_000;
+const STAFF_MESSAGE_LIMIT_PER_MINUTE = 12;
+const STAFF_RATE_NOTICE_COOLDOWN_MS = 60_000;
+const pendingStaffMessages = new Map<string, { texts: string[]; flushed: Promise<void>; release: () => void }>();
+const staffMessageTimestamps = new Map<string, number[]>();
+const staffRateNoticeAt = new Map<string, number>();
+
+function takeStaffMessageAllowance(userId: number, now = Date.now()): boolean {
+  const key = String(userId);
+  const recent = (staffMessageTimestamps.get(key) ?? []).filter((timestamp) => now - timestamp < 60_000);
+  if (recent.length >= STAFF_MESSAGE_LIMIT_PER_MINUTE) {
+    staffMessageTimestamps.set(key, recent);
+    return false;
+  }
+  recent.push(now);
+  staffMessageTimestamps.set(key, recent);
+  return true;
+}
+
+async function groupNearbyStaffMessages(ctx: BotContext, text: string): Promise<boolean> {
+  const chatId = ctx.chat?.id;
+  const userId = ctx.from?.id;
+  if (chatId == null || userId == null || !text.trim() || text.startsWith("/")) return true;
+  const key = `${chatId}:${userId}`;
+  const existing = pendingStaffMessages.get(key);
+  if (existing) {
+    existing.texts.push(text.trim().slice(0, 4000));
+    await existing.flushed;
+    return false;
+  }
+
+  let release!: () => void;
+  const flushed = new Promise<void>((resolve) => { release = resolve; });
+  const batch = { texts: [text.trim().slice(0, 4000)], flushed, release };
+  pendingStaffMessages.set(key, batch);
+  await new Promise((resolve) => setTimeout(resolve, STAFF_MESSAGE_GROUP_MS));
+  if (pendingStaffMessages.get(key) === batch) pendingStaffMessages.delete(key);
+  const combined = batch.texts.join("\n").slice(0, 6000);
+  if (batch.texts.length > 1 && ctx.message && "text" in ctx.message) {
+    (ctx.message as { text?: string }).text = combined;
+  }
+  batch.release();
+  return true;
+}
+
+function rateLimitNoticeIsDue(userId: number, now = Date.now()): boolean {
+  const key = String(userId);
+  const last = staffRateNoticeAt.get(key) ?? 0;
+  if (now - last < STAFF_RATE_NOTICE_COOLDOWN_MS) return false;
+  staffRateNoticeAt.set(key, now);
+  return true;
+}
 
 const TEAM_LIST_RE =
   /(?:список|покажи|перечисли|назови).{0,48}сотрудник|сотрудник\w*.{0,24}v[\s-]?brand|состав\s+команд|вся\s+команда|кто\s+(?:у\s+нас\s+)?в\s+команде/iu;
@@ -82,6 +144,7 @@ async function tryForwardIssueToDevelopers(
   userId?: number,
 ): Promise<string | null> {
   if (!FORWARD_TO_DEV_RE.test(text)) return null;
+  if (await creatorForbids("forward")) return "A creator-set policy currently blocks forwarding this message.";
   const chatId = ctx.chat?.id;
   if (chatId == null) return null;
 
@@ -120,7 +183,13 @@ async function tryForwardIssueToDevelopers(
     hasMedia: false,
   });
 
-  const body = ["Добрый день!", "", issue, "", "↩️ Ответьте reply на это сообщение — перешлю клиенту."].join(
+  const body = [
+    "Добрый день!",
+    "",
+    issue,
+    "",
+    "↩️ Клиенту перешлю только ответ, что готово, или уточняющий вопрос по этой проблеме.",
+  ].join(
     "\n",
   );
   const sentLabels: string[] = [];
@@ -278,7 +347,7 @@ function isAddressedToSomeoneElse(ctx: BotContext, text: string): boolean {
 export function wantsStaffAssistant(ctx: BotContext, text: string): boolean {
   const from = ctx.from;
   if (!from) return false;
-  if (!isVbrandTeamMember(from) && !isBotOwner(from.id)) return false;
+  if (!isVbrandTeamMember(from) && !isBotOwner(from.id) && !ctx.privateChatAuthorized) return false;
   if (!text.trim()) return false;
   if (shouldSkipStaffForClientTest(ctx, text)) return false;
 
@@ -320,22 +389,59 @@ export async function handleStaffAssistantMessage(
     bindingRole?: "client" | "executor" | "staff";
   },
 ): Promise<boolean> {
-  const text = ctx.message?.text || ctx.message?.caption || "";
+  let text = ctx.message?.text || ctx.message?.caption || "";
   if (!wantsStaffAssistant(ctx, text)) return false;
-
-  const member = resolveTeamMember(ctx.from);
-  const chatId = ctx.chat?.id != null ? String(ctx.chat.id) : null;
   const userId = ctx.from?.id;
+  if (userId != null && !takeStaffMessageAllowance(userId)) {
+    if (rateLimitNoticeIsDue(userId)) await ctx.reply("Слишком много сообщений подряд. Объедини запросы или подожди минуту — тогда я продолжу.");
+    return true;
+  }
+  if (ctx.message && "text" in ctx.message && !await groupNearbyStaffMessages(ctx, text)) return true;
+  text = ctx.message?.text || ctx.message?.caption || text;
+
+  const member = resolveTeamMember(ctx.from) || (ctx.chat?.type === "private" && ctx.privateChatAuthorized && ctx.from && !isBotOwner(ctx.from.id)
+    ? {
+        key: `authorized_${ctx.from.id}`,
+        display_name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ") || "Пользователь",
+        role: "other" as const,
+        role_label: "пользователь с доступом к личному чату",
+        telegram_user_id: String(ctx.from.id),
+        telegram_username: ctx.from.username?.toLowerCase() || null,
+        aliases: [],
+        project_roles: {},
+      }
+    : null);
+  const chatId = ctx.chat?.id != null ? String(ctx.chat.id) : null;
+
+  if (chatId && userId) {
+    try {
+      const inserted = await saveStaffUserTurn(chatId, userId, text, ctx.update.update_id);
+      if (!inserted) return true;
+    } catch (e) {
+      console.error("incoming dialogue save failed", e);
+      await ctx.reply("Не смогла сохранить сообщение в историю, поэтому пока не отвечаю. Попробуй ещё раз позже.");
+      return true;
+    }
+  }
 
   let userText = text;
   const sendReply = async (reply: string) => {
-    await ctx.reply(reply);
-    if (chatId && userId) await appendStaffExchange(chatId, userId, userText, reply);
+    await replyInTelegramParts(ctx, reply);
+    if (chatId && userId) await appendStaffExchange(chatId, userId, userText, reply, ctx.update.update_id);
   };
 
-  const history = chatId && userId ? await getStaffTurns(chatId, userId) : [];
+  if (userId && isBotOwner(userId) && ctx.chat?.type === "private") {
+    const policy = parseCreatorPolicyInstruction(text);
+    if (policy) {
+      await saveSharedMemory({ ...policy, createdBy: String(userId) });
+      await sendReply("Creator rule saved. It will apply to future replies; use /teach list to review rules.");
+      return true;
+    }
+  }
+
+  const history = chatId && userId ? await getStaffTurns(chatId, userId, ctx.update.update_id) : [];
   const earlier =
-    chatId && userId ? await recallEarlierTurns(chatId, userId, text) : [];
+    chatId && userId ? await recallEarlierTurns(chatId, userId, text, env.memoryTimezone) : [];
   const thread = history.map((l) => `${l.who}: ${l.text}`).join("\n");
   const mentions = extractMentionsForWeeek(ctx);
   const replyText =
@@ -411,20 +517,31 @@ export async function handleStaffAssistantMessage(
   if (heard) userText = [text.trim(), heard].filter(Boolean).join("\n");
 
   const projectInfo = chatId ? await getProjectByChatId(chatId) : null;
-  const handoff = isImplementationRequest(userText)
+  const implementationRequested = isImplementationRequest(userText);
+  const implementationBlocked = implementationRequested && await creatorForbids("implementation");
+  const handoff = implementationRequested && !implementationBlocked
     ? await forwardImplementationForApproval(ctx, userText, userId)
     : null;
-  const handoffNote =
-    handoff === "sent"
+  const handoffNote = implementationBlocked
+      ? "A creator-set policy blocks forwarding implementation requests. Do not claim the request was sent."
+      : handoff === "sent"
       ? "Сообщение уже отправлено в чат разработчиков на согласование. Скажи это прямо: сама внедрение не решаешь. Если в ссылке sbp.nspk.ru — это СБП, говори про оплату СБП, не про абстрактную «функцию». Не пиши «обсужу с командой»."
       : handoff === "here"
         ? "Это уже чат разработчиков. Скажи, что решение о внедрении за ними. Не пиши, что переслала сообщение в другой чат."
       : handoff === "failed" || handoff === "missing"
         ? "Передать вопрос разработчикам не удалось. Не пиши, что уже отправила его в группу разработки."
         : "";
+  if (implementationBlocked) {
+    await sendReply("A creator-set policy currently blocks this implementation handoff.");
+    return true;
+  }
   const memory = {
     dialogueSummary: chatId && userId ? await getDialogueSummary(chatId, String(userId)) : "",
-    lessons: await formatLessonsForPrompt(),
+    lessons: userId ? await formatRelevantLessonsForPrompt(String(userId), userText) : "",
+    longTerm: chatId && userId ? await formatMemoriesForPrompt(String(userId), chatId) : "",
+    sharedKnowledge: await formatSharedKnowledgeForPrompt(userText),
+    documentKnowledge: await formatDocumentKnowledgeForPrompt(userText),
+    creatorPolicies: await formatCreatorPoliciesForPrompt(),
     problemStatus: projectInfo ? await formatProblemStatus(projectInfo.project.id) : "",
   };
 
@@ -439,9 +556,8 @@ export async function handleStaffAssistantMessage(
       project_roles: {},
       aliases: [],
     };
-    await sendReply(
-      withApprovalLine(
-      await generateStaffAssistantReply({
+    await withTyping(ctx, async () => {
+      const reply = await generateStaffAssistantReply({
         member: stub,
         text: userText,
         chatType: ctx.chat?.type || "private",
@@ -453,12 +569,15 @@ export async function handleStaffAssistantMessage(
         earlierDialogue: earlier,
         dialogueSummary: memory.dialogueSummary,
         lessons: memory.lessons,
+        longTermMemory: memory.longTerm,
+        sharedKnowledge: memory.sharedKnowledge,
+        documentKnowledge: memory.documentKnowledge,
+        creatorPolicies: memory.creatorPolicies,
         problemStatus: memory.problemStatus,
         handoffNote,
-      }),
-      handoff,
-      ),
-    );
+      });
+      await sendReply(withApprovalLine(reply, handoff));
+    });
     return true;
   }
 
@@ -477,9 +596,8 @@ export async function handleStaffAssistantMessage(
     return false;
   }
 
-  await sendReply(
-    withApprovalLine(
-    await generateStaffAssistantReply({
+  await withTyping(ctx, async () => {
+    const reply = await generateStaffAssistantReply({
       member,
       text: userText,
       chatType: ctx.chat?.type || "private",
@@ -491,11 +609,14 @@ export async function handleStaffAssistantMessage(
       earlierDialogue: earlier,
       dialogueSummary: memory.dialogueSummary,
       lessons: memory.lessons,
+      longTermMemory: memory.longTerm,
+      sharedKnowledge: memory.sharedKnowledge,
+      documentKnowledge: memory.documentKnowledge,
+      creatorPolicies: memory.creatorPolicies,
       problemStatus: memory.problemStatus,
       handoffNote,
-    }),
-    handoff,
-    ),
-  );
+    });
+    await sendReply(withApprovalLine(reply, handoff));
+  });
   return true;
 }

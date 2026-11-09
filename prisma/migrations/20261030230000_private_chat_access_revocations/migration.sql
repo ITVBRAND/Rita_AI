@@ -1,0 +1,2 @@
+ALTER TABLE "PrivateChatAccess"
+ADD COLUMN "allowed" BOOLEAN NOT NULL DEFAULT true;
