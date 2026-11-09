@@ -40,7 +40,7 @@ export function formatDevRelayBriefScript(params: {
     if (quote && quote !== head) {
       lines.push("", quote.slice(0, 1500));
     } else if (params.hasMedia) {
-      lines.push("", "(клиент прислал вложение — см. ниже)");
+      lines.push("", "(клиент прислал скрин или фото документа — вложение в этот чат не пересылаю)");
     }
   }
 

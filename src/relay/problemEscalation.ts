@@ -146,7 +146,9 @@ export async function observeClientWorkChat(ctx: BotContext): Promise<"hold" | "
     orderBy: { createdAt: "desc" },
   });
   const ids = pending ? parseIds(pending.messageIds) : [];
-  ids.push(ctx.message.message_id);
+  // Скрины и фото документов остаются в рабочем чате, в чат разработки не копируются.
+  const visual = Boolean(ctx.message.photo || ctx.message.document);
+  if (!visual) ids.push(ctx.message.message_id);
   const nextText = [pending?.text, text.trim()].filter(Boolean).join("\n").slice(0, 4000);
   const data = {
     text: nextText || "(скрин проблемы без текста)",

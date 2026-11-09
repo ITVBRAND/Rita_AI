@@ -82,6 +82,12 @@ function hasMedia(ctx: BotContext): boolean {
   return Boolean(m.photo || m.document || m.video || m.voice || m.audio || m.video_note);
 }
 
+/** Скрины, фото и файлы документов клиенту в чат разработки не копируем. */
+function isClientPhotoOrDocument(ctx: BotContext): boolean {
+  const m = ctx.message;
+  return Boolean(m?.photo || m?.document);
+}
+
 function extractMentions(ctx: BotContext): { userIds: string[]; texts: string[] } {
   const msg = ctx.message;
   if (!msg) return { userIds: [], texts: [] };
@@ -631,7 +637,7 @@ export function registerHandlers(bot: Bot<BotContext>) {
             telegramMessageId: String(message.message_id),
             kind: "relay",
           });
-          if (hasMedia(ctx) && ctx.message?.message_id) {
+          if (hasMedia(ctx) && ctx.message?.message_id && !isClientPhotoOrDocument(ctx)) {
             await ctx.api.copyMessage(Number(ex.chatId), Number(ctx.chat!.id), ctx.message.message_id);
           }
           sent += 1;
@@ -939,7 +945,7 @@ export function registerHandlers(bot: Bot<BotContext>) {
               telegramMessageId: String(sent.message_id),
               kind: "relay",
             });
-            if (media && ctx.message?.message_id) {
+            if (media && ctx.message?.message_id && !isClientPhotoOrDocument(ctx)) {
               await ctx.api.copyMessage(Number(ex.chatId), Number(chatId), ctx.message.message_id);
             }
           } catch (e) {
@@ -1159,7 +1165,7 @@ async function relayToDevelopers(
         telegramMessageId: String(sent.message_id),
         kind: "relay",
       });
-      if (messageId && hasMedia(ctx)) {
+      if (messageId && hasMedia(ctx) && !isClientPhotoOrDocument(ctx)) {
         await ctx.api.copyMessage(Number(ex.chatId), Number(sourceChatId), messageId);
       }
     } catch (e) {
